@@ -51,6 +51,11 @@ from .block import (
     SCDown,
     RepVGGDW
 )
+from .mafyolo import (
+    RepHDW,
+    AVG
+
+)
 from .conv import (
     CBAM,
     ChannelAttention,

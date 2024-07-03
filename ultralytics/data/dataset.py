@@ -154,6 +154,13 @@ class YOLODataset(BaseDataset):
         if self.augment:
             hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
             hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
+            hyp.dycache_mixup = hyp.dycache_mixup if self.augment and not self.rect else 0.0
+            hyp.dycache_mixup_n = hyp.dycache_mixup_n if self.augment and not self.rect else 0.0
+            if int(hyp.dycache_mixup * 100) != 0:
+                hyp.dycache_normmixup = hyp.mixup
+                hyp.mixup = 0
+            else:
+                hyp.dycache_normmixup = 0
             transforms = v8_transforms(self, self.imgsz, hyp)
         else:
             transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])

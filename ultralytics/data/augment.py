@@ -342,8 +342,56 @@ class MixUp(BaseMixTransform):
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
         return labels
+import copy
+class DyCacheMixUp(BaseMixTransform):
+    """Class for applying MixUp augmentation to the dataset."""
+
+    def __init__(self, dataset, pre_transform=None, p=0.0, dycache_mixup = 0.0, dycache_mixup_n = 5, dycache_normmixup = 0.0) -> None:
+        """Initializes MixUp object with dataset, pre_transform, and probability of applying MixUp."""
+        super().__init__(dataset=dataset, pre_transform=pre_transform, p=p)
+        self.dy_cache_img_information = []
+        self.max_cached_images = 40
+        self.random_pop = True
+        self.dycache_mixup = dycache_mixup
+        self.dycache_mixup_n = dycache_mixup_n
+        self.dycache_normmixup = dycache_normmixup
 
 
+    def get_indexes(self):
+        """Get a random index from the dataset."""
+        return random.randint(0, len(self.dataset) - 1)
+
+    def _mix_transform(self, labels):
+        """Applies MixUp augmentation as per https://arxiv.org/pdf/1710.09412.pdf."""
+        if len(labels["instances"]) <= self.dycache_mixup_n and random.random() < self.dycache_mixup:
+
+            r = np.random.beta(32.0, 32.0)  # mixup ratio, alpha=beta=32.0
+            labels2 = labels["mix_labels"][0]
+            #random.choices(list(self.dataset.buffer), k=1)
+
+            dy_cache_img_information = [labels2["img"], labels2["cls"], labels2["instances"]]
+            self.dy_cache_img_information.append(copy.deepcopy(dy_cache_img_information))
+            if len(self.dy_cache_img_information) > self.max_cached_images:
+                if self.random_pop:
+                    index = random.randint(0, len(self.dy_cache_img_information) - 1)
+                else:
+                    index = 0
+                self.dy_cache_img_information.pop(index)
+            dy_cache_index = random.randint(0, len(self.dy_cache_img_information) - 1)
+            per_img = self.dy_cache_img_information[dy_cache_index][0]
+            per_cls = self.dy_cache_img_information[dy_cache_index][1]
+            pre_label = self.dy_cache_img_information[dy_cache_index][2]
+
+            labels["img"] = (labels["img"] * r + per_img * (1 - r)).astype(np.uint8)
+            labels["instances"] = Instances.concatenate([labels["instances"], pre_label], axis=0)
+            labels["cls"] = np.concatenate([labels["cls"], per_cls], 0)
+        elif random.random() < self.dycache_normmixup:
+            r = np.random.beta(32.0, 32.0)  # mixup ratio, alpha=beta=32.0
+            labels2 = labels["mix_labels"][0]
+            labels["img"] = (labels["img"] * r + labels2["img"] * (1 - r)).astype(np.uint8)
+            labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
+            labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
+        return labels
 class RandomPerspective:
     """
     Implements random perspective and affine transformations on images and corresponding bounding boxes, segments, and
@@ -998,6 +1046,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
     return Compose(
         [
             pre_transform,
+            DyCacheMixUp(dataset, pre_transform=pre_transform, p=1, dycache_mixup = hyp.dycache_mixup, dycache_mixup_n=hyp.dycache_mixup_n,dycache_normmixup=hyp.dycache_normmixup),
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
             Albumentations(p=1.0),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),

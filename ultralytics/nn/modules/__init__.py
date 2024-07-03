@@ -53,7 +53,9 @@ from .block import (
 )
 from .mafyolo import (
     RepHDW,
-    AVG
+    AVG,
+    RepHMS,
+    RepELANMSv2
 
 )
 from .conv import (
@@ -71,7 +73,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, v10ATSSDetect
 from .transformer import (
     AIFI,
     MLP,

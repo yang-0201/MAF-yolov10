@@ -49,13 +49,16 @@ from .block import (
     PSA,
     C2fCIB,
     SCDown,
-    RepVGGDW
+    RepVGGDW,
+    CSPSA,
+    LAE
 )
 from .mafyolo import (
     RepHDW,
     AVG,
     RepHMS,
-    RepELANMSv2
+    RepELANMSv2,
+    UniRepLKNetBlock
 
 )
 from .conv import (
@@ -150,5 +153,7 @@ __all__ = (
     "C2fCIB",
     "SCDown",
     "RepVGGDW",
-    "v10Detect"
+    "v10Detect",
+    "CSPSA",
+    "LAE"
 )

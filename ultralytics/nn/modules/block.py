@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
+from einops import rearrange
 
 __all__ = (
     "DFL",
@@ -38,6 +39,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "LAE"
 )
 
 
@@ -827,3 +829,98 @@ class SCDown(nn.Module):
         return self.cv2(self.cv1(x))
 
 
+class CSMHSA(nn.Module):
+    def __init__(self, n_dims, heads=8):
+        super(CSMHSA, self).__init__()
+
+        self.heads = heads
+        self.query = nn.Sequential(
+            nn.Upsample(scale_factor=2),
+            nn.Conv2d(n_dims[0], n_dims[1], kernel_size=1)
+        )
+        self.key = nn.Conv2d(n_dims[1], n_dims[1], kernel_size=1)
+        self.value = nn.Conv2d(n_dims[1], n_dims[1], kernel_size=1)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        x_high, x_low = x
+        n_batch, C, width, height = x_low.size()
+        q = self.query(x_high).view(n_batch, self.heads, C // self.heads, -1)
+        k = self.key(x_low).view(n_batch, self.heads, C // self.heads, -1)
+        v = self.value(x_low).view(n_batch, self.heads, C // self.heads, -1)
+        content_content = torch.matmul(q.permute(0, 1, 3, 2), k)
+        attention = self.softmax(content_content)
+        out = torch.matmul(v, attention.permute(0, 1, 3, 2))
+        out = out.view(n_batch, C, width, height)
+        return out
+    
+class CSPSA(nn.Module):
+
+    def __init__(self, c1, c2, e=0.5):
+        super().__init__()
+        assert(c1 == c2)
+        self.c = int(c1 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv(2 * self.c, c1, 1)
+        
+        # self.attn = Attention(self.c, attn_ratio=0.5, num_heads=self.c // 64)
+        self.att = MatchNeck_Inner(self.c)
+        self.ffn = nn.Sequential(
+            Conv(self.c, self.c*2, 1),
+            Conv(self.c*2, self.c, 1, act=False)
+        )
+        
+    def forward(self, x):
+        a, b = self.cv1(x).split((self.c, self.c), dim=1)
+        print(b.size(), "================")
+        b = b + self.att(b)
+        print(b.size(), "11111111111111111111")
+        b = b + self.ffn(b)
+        return self.cv2(torch.cat((a, b), 1))
+
+class MatchNeck_Inner(nn.Module):
+    def __init__(self, channels) -> None:
+        super().__init__()
+        
+        self.gap = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            Conv(channels, channels)
+        )
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.conv_hw = Conv(channels, channels, (3, 1))
+        self.conv_pool_hw = Conv(channels, channels, 1)
+    
+    def forward(self, x):
+        _, _, h, w = x.size()
+        x_pool_h, x_pool_w, x_pool_ch = self.pool_h(x), self.pool_w(x).permute(0, 1, 3, 2), self.gap(x)
+        x_pool_hw = torch.cat([x_pool_h, x_pool_w], dim=2)
+        x_pool_h, x_pool_w = torch.split(x_pool_hw, [h, w], dim=2)
+        x_pool_hw_weight = x_pool_hw.sigmoid()
+        x_pool_h_weight, x_pool_w_weight = torch.split(x_pool_hw_weight, [h, w], dim=2)
+        x_pool_h, x_pool_w = x_pool_h * x_pool_h_weight, x_pool_w * x_pool_w_weight
+        x_pool_ch = x_pool_ch * torch.mean(x_pool_hw_weight, dim=2, keepdim=True)
+        return x * x_pool_h.sigmoid() * x_pool_w.permute(0, 1, 3, 2).sigmoid() * x_pool_ch.sigmoid()
+
+class LAE(nn.Module):
+    # Light-weight Adaptive Extraction
+    def __init__(self, ch, group=16) -> None:
+        super().__init__()
+        
+        self.softmax = nn.Softmax(dim=-1)
+        self.attention = nn.Sequential(
+            nn.AvgPool2d(kernel_size=3, stride=1, padding=1),
+            Conv(ch, ch, k=1)
+        )
+        
+        self.ds_conv = Conv(ch, ch * 4, k=3, s=2, g=(ch // group))
+    
+    def forward(self, x):
+        # bs, ch, 2*h, 2*w => bs, ch, h, w, 4
+        att = rearrange(self.attention(x), 'bs ch (s1 h) (s2 w) -> bs ch h w (s1 s2)', s1=2, s2=2)
+        att = self.softmax(att)
+        
+        # bs, 4 * ch, h, w => bs, ch, h, w, 4
+        x = rearrange(self.ds_conv(x), 'bs (s ch) h w -> bs ch h w s', s=4)
+        x = torch.sum(x * att, dim=-1)
+        return x

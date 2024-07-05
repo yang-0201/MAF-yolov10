@@ -59,6 +59,9 @@ from ultralytics.nn.modules import (
     RepHMS,
     v10ATSSDetect,
     v10Detect,
+    CSPSA,
+    LAE,
+    UniRepLKNetBlock
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -204,6 +207,9 @@ class BaseModel(nn.Module):
                 if isinstance(m, RepVGGDW):
                     m.fuse()
                     m.forward = m.forward_fuse
+                if isinstance(m, UniRepLKNetBlock):
+                    m.reparameterize()
+                    LOGGER.info("Switch model to UniRepLKNetBlock")
             self.info(verbose=verbose)
 
         return self
@@ -650,7 +656,7 @@ class WorldModel(DetectionModel):
 
 class YOLOv10DetectionModel(DetectionModel):
     def init_criterion(self):
-        return v10DetectATSSLoss(self)
+        return v10DetectLoss(self)
 
 class Ensemble(nn.ModuleList):
     """Ensemble of models."""
@@ -898,7 +904,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             RepHDW,
             RepHMS,
-            RepELANMSv2
+            RepELANMSv2,
+            CSPSA
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -942,6 +949,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m is LAE:
+            c2 = ch[f]
+            args = [c2, *args]
         else:
             c2 = ch[f]
 

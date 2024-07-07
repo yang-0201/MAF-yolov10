@@ -542,7 +542,142 @@ class v10ATSSDetect(Detect):
             a[-1].bias.data[:] = 1.0  # box
             b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
 
+class v10Detect_aux(Detect):
+    max_det = 300
 
+    def __init__(self, nc=80, ch=()):
+        super().__init__(nc, ch)
+        c3 = max(ch[0], min(self.nc, 100))  # channels
+        self.cv3 = nn.ModuleList(nn.Sequential(nn.Sequential(Conv(x, x, 3, g=x), Conv(x, c3, 1)), \
+                                               nn.Sequential(Conv(c3, c3, 3, g=c3), Conv(c3, c3, 1)), \
+                                               nn.Conv2d(c3, self.nc, 1)) for i, x in enumerate(ch))
+
+        self.one2one_cv2 = copy.deepcopy(self.cv2)
+        self.one2one_cv3 = copy.deepcopy(self.cv3)
+        self.cv2_aux = copy.deepcopy(self.cv2)
+        self.dfl_aux = copy.deepcopy(self.dfl)
+        self.cv3_aux = copy.deepcopy(self.cv3)
+    def forward_feat(self, x, cv2, cv3):
+        y = []
+        for i in range(self.nl//2):
+            y.append(torch.cat((cv2[i](x[i]), cv3[i](x[i])), 1))
+        return y
+
+    def forward(self, x):
+        self.stride = self.stride[0:3]
+        one2one = self.forward_feat([x[i].detach() for i in range(self.nl // 2)], self.one2one_cv2, self.one2one_cv3)
+        if not self.export:
+            one2many = self.forward_detect(x)
+
+        if not self.training:
+            one2one = self.inference1(one2one)
+            if not self.export:
+                return {"one2many": one2many, "one2one": one2one}
+            else:
+                assert (self.max_det != -1)
+                boxes, scores, labels = ops.v10postprocess(one2one.permute(0, 2, 1), self.max_det, self.nc)
+                return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
+        else:
+            return {"one2many": one2many, "one2one": one2one}
+
+    def forward_detect(self, x):
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        # y = self.forward_feat(x, self.cv2, self.cv3)
+        y = self.forward_feat_aux(x, self.cv2, self.cv3, self.cv2_aux, self.cv3_aux)
+
+        if self.training:
+            return y
+
+        return self.inference_aux(y)
+
+    def forward_feat_aux(self, x, cv2, cv3, cv2_aux, cv3_aux):
+        y = []
+        for i in range(self.nl // 2):
+            y.append(torch.cat((cv2[i](x[i]), cv3[i](x[i])), 1))
+        for i in range(self.nl // 2, self.nl):
+            y.append(torch.cat((cv2_aux[i - self.nl // 2](x[i]), cv3_aux[i - self.nl // 2](x[i])), 1))
+
+        return y
+
+    def inference_aux(self, x):
+        # Inference path
+
+        shape = x[0].shape  # BCHW
+        x_aux = x[3:6]
+        x = x[0:3]
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        x_cat_aux = torch.cat([xi.view(shape[0], self.no, -1) for xi in x_aux], 2)
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4:]
+            box_aux = x_cat_aux[:, : self.reg_max * 4]
+            cls_aux = x_cat_aux[:, self.reg_max * 4:]
+        else:
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+            box_aux, cls_aux = x_cat_aux.split((self.reg_max * 4, self.nc), 1)
+
+        if self.export and self.format in ("tflite", "edgetpu"):
+            # Precompute normalization factor to increase numerical stability
+            # See https://github.com/ultralytics/ultralytics/issues/7371
+            grid_h = shape[2]
+            grid_w = shape[3]
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            norm = self.strides / (self.stride[0] * grid_size)
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+        else:
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+            dbox_aux = self.decode_bboxes(self.dfl_aux(box_aux), self.anchors.unsqueeze(0)) * self.strides
+
+        y = torch.cat((dbox, cls.sigmoid()), 1)
+        y_aux = torch.cat((dbox_aux, cls_aux.sigmoid()), 1)
+        return y if self.export else (y, x, y_aux, x_aux)
+
+    def inference1(self, x):
+        # Inference path
+        shape = x[0].shape  # BCHW
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4:]
+        else:
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+
+        if self.export and self.format in ("tflite", "edgetpu"):
+            # Precompute normalization factor to increase numerical stability
+            # See https://github.com/ultralytics/ultralytics/issues/7371
+            grid_h = shape[2]
+            grid_w = shape[3]
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            norm = self.strides / (self.stride[0] * grid_size)
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+        else:
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+
+        y = torch.cat((dbox, cls.sigmoid()), 1)
+        return y if self.export else (y, x)
+
+    def bias_init(self):
+        super().bias_init()
+        """Initialize Detect() biases, WARNING: requires stride availability."""
+        m = self  # self.model[-1]  # Detect() module
+        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
+        # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
+        for a, b, s in zip(m.one2one_cv2, m.one2one_cv3, m.stride):  # from
+            a[-1].bias.data[:] = 1.0  # box
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+        for a, b, s in zip(m.cv2_aux, m.cv3_aux, m.stride):  # from
+            a[-1].bias.data[:] = 1.0  # box
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
+            
 class v10Detect(Detect):
     max_det = 300
 

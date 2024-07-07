@@ -59,13 +59,14 @@ from ultralytics.nn.modules import (
     RepHMS,
     v10ATSSDetect,
     v10Detect,
+    v10Detect_aux,
     CSPSA,
     LAE,
     UniRepLKNetBlock
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
-from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss, v10DetectLoss, v10DetectATSSLoss
+from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss, v10DetectLoss, v10DetectATSSLoss, v10DetectLoss_aux
 from ultralytics.utils.plotting import feature_visualization
 from ultralytics.utils.torch_utils import (
     fuse_conv_and_bn,
@@ -316,6 +317,8 @@ class DetectionModel(BaseModel):
             if isinstance(m, v10Detect):
                 forward = lambda x: self.forward(x)["one2many"]
             if isinstance(m, v10ATSSDetect):
+                forward = lambda x: self.forward(x)["one2many"]
+            if isinstance(m, v10Detect_aux):
                 forward = lambda x: self.forward(x)["one2many"]
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
@@ -656,7 +659,7 @@ class WorldModel(DetectionModel):
 
 class YOLOv10DetectionModel(DetectionModel):
     def init_criterion(self):
-        return v10DetectLoss(self)
+        return v10DetectLoss_aux(self)
 
 class Ensemble(nn.ModuleList):
     """Ensemble of models."""
@@ -937,7 +940,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = ch[f]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, v10ATSSDetect}:
+        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, v10ATSSDetect, v10Detect_aux}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
@@ -1028,7 +1031,7 @@ def guess_model_task(model):
         m = cfg["head"][-1][-2].lower()  # output module name
         if m in {"classify", "classifier", "cls", "fc"}:
             return "classify"
-        if m == "detect" or m == "v10detect" or m == "v10atssdetect":
+        if m == "detect" or m == "v10detect" or m == "v10atssdetect" or m == 'v10Detect_aux':
             return "detect"
         if m == "segment":
             return "segment"
@@ -1036,6 +1039,8 @@ def guess_model_task(model):
             return "pose"
         if m == "obb":
             return "obb"
+        else:
+            return 'detect'
 
     # Guess from model cfg
     if isinstance(model, dict):
@@ -1060,7 +1065,7 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect, v10Detect, v10ATSSDetect)):
+            elif isinstance(m, (Detect, WorldDetect, v10Detect, v10ATSSDetect, v10Detect_aux)):
                 return "detect"
 
     # Guess from model filename
